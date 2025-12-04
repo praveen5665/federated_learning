@@ -17,6 +17,8 @@ import sys
 import os
 import time
 import warnings
+from quantization_utils import quantize_weights_fp16, dequantize_weights_fp16
+
 warnings.filterwarnings('ignore')
 
 # Disable GPU if not available (for IoT devices)
@@ -60,16 +62,18 @@ print(f"{'='*50}\n")
 
 def create_autoencoder(input_dim=20):
     """
-    Create lightweight autoencoder for IoT devices
+    Create lightweight autoencoder for IoT devices with regularization
     Total params: ~2000 (very small!)
     """
-    # Encoder
+    # Encoder with dropout for regularization
     encoder_input = keras.Input(shape=(input_dim,))
     encoded = keras.layers.Dense(12, activation='relu', name='encoder_1')(encoder_input)
+    encoded = keras.layers.Dropout(0.2)(encoded)  # Add dropout
     encoded = keras.layers.Dense(6, activation='relu', name='bottleneck')(encoded)
     
-    # Decoder
+    # Decoder with dropout
     decoded = keras.layers.Dense(12, activation='relu', name='decoder_1')(encoded)
+    decoded = keras.layers.Dropout(0.2)(decoded)  # Add dropout
     decoded = keras.layers.Dense(input_dim, activation='linear', name='decoder_output')(decoded)
     
     # Full autoencoder
@@ -85,7 +89,7 @@ def create_autoencoder(input_dim=20):
 
 
 class AutoencoderClient(fl.client.NumPyClient):
-    """Flower client with Autoencoder for anomaly detection"""
+    """Flower client with Autoencoder for anomaly detection with FP16 quantization"""
     
     def __init__(self, client_id, X_train, y_train, scaler):
         self.client_id = client_id
@@ -95,6 +99,8 @@ class AutoencoderClient(fl.client.NumPyClient):
         self.model = create_autoencoder(input_dim=X_train.shape[1])
         self.threshold = None  # Will be set after training
         self.current_round = 0
+        self.global_threshold = None  # Track global threshold from server
+        self.use_quantization = True  # Enable quantization
         
         # Load test data
         test_data = pd.read_csv("data/processed/test_data.csv")
@@ -104,17 +110,26 @@ class AutoencoderClient(fl.client.NumPyClient):
         
         print(f"Autoencoder created:")
         print(f"  Total params: {self.model.count_params()}")
-        print(f"  Model size: ~{self.model.count_params() * 4 / 1024:.2f} KB")
+        original_size = self.model.count_params() * 4 / 1024
+        quantized_size = self.model.count_params() * 2 / 1024  # FP16 = 2 bytes
+        print(f"  Model size (FP32): ~{original_size:.2f} KB")
+        print(f"  Model size (FP16): ~{quantized_size:.2f} KB")
+        print(f"  Compression: {original_size/quantized_size:.2f}x")
         self.model.summary()
     
     def get_parameters(self, config):
-        """Return model weights"""
-        return self.model.get_weights()
+        """Return model weights (quantized to FP16)"""
+        weights = self.model.get_weights()
+        if self.use_quantization:
+            weights, _ = quantize_weights_fp16(weights)
+        return weights
     
     def set_parameters(self, parameters):
-        """Set model weights from server"""
+        """Set model weights from server (dequantize from FP16)"""
+        if self.use_quantization:
+            parameters = dequantize_weights_fp16(parameters)
         self.model.set_weights(parameters)
-        print(f"  Applied {len(parameters)} weight matrices from server")
+        print(f"  Applied {len(parameters)} weight matrices from server (FP16 → FP32)")
     
     def fit(self, parameters, config):
         """Train autoencoder on normal data"""
@@ -127,14 +142,27 @@ class AutoencoderClient(fl.client.NumPyClient):
         if parameters:
             self.set_parameters(parameters)
         
-        # Train only on normal data (label=1)
-        # Autoencoder learns to reconstruct normal patterns
+        # Get global threshold from config if available
+        if 'global_threshold' in config:
+            self.global_threshold = config['global_threshold']
+            print(f"  Using global threshold: {self.global_threshold:.6f}")
+        
+        # Early stopping callback
+        early_stopping = keras.callbacks.EarlyStopping(
+            monitor='val_loss',
+            patience=3,
+            restore_best_weights=True,
+            min_delta=0.0001
+        )
+        
+        # Train with early stopping
         history = self.model.fit(
-            self.X_train, self.X_train,  # Input = Output (reconstruction)
-            epochs=10,
+            self.X_train, self.X_train,
+            epochs=20,  # Increased but with early stopping
             batch_size=32,
             verbose=0,
-            validation_split=0.1
+            validation_split=0.1,
+            callbacks=[early_stopping]
         )
         
         training_time = time.time() - start_time
@@ -144,17 +172,26 @@ class AutoencoderClient(fl.client.NumPyClient):
         train_reconstructions = self.model.predict(self.X_train, verbose=0)
         train_mse = np.mean(np.square(self.X_train - train_reconstructions), axis=1)
         
-        # Set threshold at 95th percentile of training errors
-        self.threshold = np.percentile(train_mse, 95)
+        # Calculate local threshold
+        local_threshold = np.percentile(train_mse, 95)
+        
+        # Use global threshold if available, otherwise use local
+        if self.global_threshold is not None:
+            self.threshold = self.global_threshold
+            print(f"  Using global threshold: {self.threshold:.6f}")
+        else:
+            self.threshold = local_threshold
+            print(f"  Using local threshold: {self.threshold:.6f}")
         
         print(f"  Training completed in {training_time:.2f}s")
         print(f"  Final loss: {final_loss:.6f}")
-        print(f"  Anomaly threshold: {self.threshold:.6f}")
+        print(f"  Epochs trained: {len(history.history['loss'])}")
         
         return self.get_parameters(config={}), len(self.X_train), {
             "training_time": training_time,
             "final_loss": float(final_loss),
-            "threshold": float(self.threshold)
+            "threshold": float(local_threshold),  # Send local threshold to server
+            "epochs_trained": len(history.history['loss'])
         }
     
     def evaluate(self, parameters, config):

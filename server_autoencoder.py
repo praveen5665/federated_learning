@@ -10,6 +10,12 @@ from datetime import datetime
 from typing import List, Tuple, Dict, Optional
 from flwr.common import Metrics, Parameters, FitRes, EvaluateRes, ndarrays_to_parameters, parameters_to_ndarrays
 from flwr.server.client_proxy import ClientProxy
+from quantization_utils import (
+    quantize_weights_fp16, 
+    dequantize_weights_fp16, 
+    calculate_quantization_error,
+    print_quantization_stats
+)
 
 os.makedirs("results", exist_ok=True)
 
@@ -40,13 +46,17 @@ def weighted_average(metrics: List[Tuple[int, Metrics]]) -> Metrics:
 
 
 class AutoencoderStrategy(fl.server.strategy.FedAvg):
-    """FedAvg strategy optimized for Autoencoder"""
+    """FedAvg strategy optimized for Autoencoder with FP16 Quantization"""
     
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.round_results = []
         self.experiment_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+        self.global_threshold = None
+        self.use_quantization = True  # Enable quantization
+        self.quantization_stats = []  # Track quantization metrics
         print(f"Autoencoder Experiment ID: {self.experiment_id}")
+        print(f"Quantization: FP16 (16-bit) Enabled")
     
     def aggregate_fit(
         self,
@@ -54,15 +64,22 @@ class AutoencoderStrategy(fl.server.strategy.FedAvg):
         results: List[Tuple[ClientProxy, FitRes]],
         failures: List[BaseException],
     ) -> Tuple[Optional[Parameters], Dict[str, float]]:
-        """Aggregate neural network weights"""
+        """Aggregate neural network weights with quantization"""
         if not results:
             return None, {}
         
-        # Extract weights from all clients
-        all_weights_list = [parameters_to_ndarrays(fit_res.parameters) for _, fit_res in results]
+        # Extract weights from all clients (dequantize if needed)
+        all_weights_list = []
+        for _, fit_res in results:
+            weights = parameters_to_ndarrays(fit_res.parameters)
+            # Dequantize from FP16 to FP32 for aggregation
+            if self.use_quantization:
+                weights = dequantize_weights_fp16(weights)
+            all_weights_list.append(weights)
+        
         all_num_examples = [fit_res.num_examples for _, fit_res in results]
         
-        # Weighted average (FedAvg)
+        # Weighted average (FedAvg) in FP32
         total_examples = sum(all_num_examples)
         aggregated_weights = []
         
@@ -78,16 +95,37 @@ class AutoencoderStrategy(fl.server.strategy.FedAvg):
                            for weights, num in zip(all_weights_list, all_num_examples)]
             aggregated_weights.append(np.sum(layer_weights, axis=0))
         
+        # Quantize aggregated weights to FP16
+        if self.use_quantization:
+            original_weights = aggregated_weights.copy()
+            aggregated_weights, quant_stats = quantize_weights_fp16(aggregated_weights)
+            
+            # Calculate quantization error
+            error_metrics = calculate_quantization_error(original_weights, aggregated_weights)
+            quant_stats.update(error_metrics)
+            self.quantization_stats.append(quant_stats)
+            
+            print_quantization_stats(quant_stats, error_metrics)
+        
+        # Calculate global threshold (weighted average)
+        thresholds = [fit_res.metrics.get("threshold", 0) for _, fit_res in results]
+        weights = [fit_res.num_examples for _, fit_res in results]
+        self.global_threshold = float(np.average(thresholds, weights=weights))
+        
         # Stats
         avg_loss = np.mean([fit_res.metrics.get("final_loss", 0) for _, fit_res in results])
-        avg_threshold = np.mean([fit_res.metrics.get("threshold", 0) for _, fit_res in results])
+        avg_epochs = np.mean([fit_res.metrics.get("epochs_trained", 10) for _, fit_res in results])
         
         print(f"\n{'='*60}")
         print(f"Round {server_round} - Autoencoder Aggregation")
         print(f"  Clients: {len(results)}")
         print(f"  Avg training loss: {avg_loss:.6f}")
-        print(f"  Avg threshold: {avg_threshold:.6f}")
+        print(f"  Global threshold: {self.global_threshold:.6f}")
+        print(f"  Avg epochs trained: {avg_epochs:.1f}")
         print(f"  Weight matrices: {len(aggregated_weights)}")
+        if self.use_quantization:
+            print(f"  Model size (FP16): {quant_stats['quantized_size_kb']:.2f} KB")
+            print(f"  Compression: {quant_stats['compression_ratio']:.2f}x")
         print(f"{'='*60}")
         
         # Store client contributions for this round
@@ -96,8 +134,22 @@ class AutoencoderStrategy(fl.server.strategy.FedAvg):
         return ndarrays_to_parameters(aggregated_weights), {
             "num_clients": len(results),
             "avg_loss": float(avg_loss),
-            "avg_threshold": float(avg_threshold)
+            "global_threshold": self.global_threshold,
+            "quantized": self.use_quantization
         }
+    
+    def configure_fit(
+        self, server_round: int, parameters: Parameters, client_manager
+    ):
+        """Configure the next round of training"""
+        config = {}
+        
+        # Send global threshold to clients after first round
+        if self.global_threshold is not None:
+            config["global_threshold"] = self.global_threshold
+        
+        # Call parent's configure_fit
+        return super().configure_fit(server_round, parameters, client_manager)
     
     def aggregate_evaluate(
         self,
@@ -131,6 +183,7 @@ class AutoencoderStrategy(fl.server.strategy.FedAvg):
             "loss": float(weighted_loss),
             "confusion_matrix": confusion_matrix_data,
             "client_contributions": getattr(self, 'current_round_contributions', {}),
+            "quantization_stats": self.quantization_stats[-1] if self.quantization_stats else {},
             **{k: float(v) if isinstance(v, (int, float, np.number)) else v 
                for k, v in aggregated_metrics.items()}
         }
@@ -149,7 +202,9 @@ class AutoencoderStrategy(fl.server.strategy.FedAvg):
         # Save results
         results_data = {
             "experiment_id": self.experiment_id,
-            "model_type": "Autoencoder",
+            "model_type": "Autoencoder_FP16_Quantized",
+            "quantization_enabled": self.use_quantization,
+            "quantization_type": "FP16_Post_Training",
             "rounds": self.round_results
         }
         with open(f"results/experiment_autoencoder_{self.experiment_id}.json", 'w') as f:
