@@ -27,7 +27,6 @@ tf.config.set_visible_devices([], 'GPU')
 # Load selected features
 selected_features = pd.read_csv("data/processed/selected_features.csv")['selected_features'].tolist()
 
-# ...existing argument parsing code...
 if len(sys.argv) < 2:
     print("Usage: python client_autoencoder.py <client_id>")
     sys.exit(1)
@@ -65,21 +64,17 @@ def create_autoencoder(input_dim=20):
     Create lightweight autoencoder for IoT devices with regularization
     Total params: ~2000 (very small!)
     """
-    # Encoder with dropout for regularization
     encoder_input = keras.Input(shape=(input_dim,))
     encoded = keras.layers.Dense(12, activation='relu', name='encoder_1')(encoder_input)
-    encoded = keras.layers.Dropout(0.2)(encoded)  # Add dropout
+    encoded = keras.layers.Dropout(0.2)(encoded)
     encoded = keras.layers.Dense(6, activation='relu', name='bottleneck')(encoded)
     
-    # Decoder with dropout
     decoded = keras.layers.Dense(12, activation='relu', name='decoder_1')(encoded)
-    decoded = keras.layers.Dropout(0.2)(decoded)  # Add dropout
+    decoded = keras.layers.Dropout(0.2)(decoded)
     decoded = keras.layers.Dense(input_dim, activation='linear', name='decoder_output')(decoded)
     
-    # Full autoencoder
     autoencoder = keras.Model(encoder_input, decoded, name='autoencoder')
     
-    # Compile with MSE loss (reconstruction error)
     autoencoder.compile(
         optimizer=keras.optimizers.Adam(learning_rate=0.001),
         loss='mse'
@@ -97,10 +92,10 @@ class AutoencoderClient(fl.client.NumPyClient):
         self.y_train = y_train
         self.scaler = scaler
         self.model = create_autoencoder(input_dim=X_train.shape[1])
-        self.threshold = None  # Will be set after training
+        self.threshold = None
         self.current_round = 0
-        self.global_threshold = None  # Track global threshold from server
-        self.use_quantization = True  # Enable quantization
+        self.global_threshold = None
+        self.use_quantization = True
         
         # Load test data
         test_data = pd.read_csv("data/processed/test_data.csv")
@@ -111,7 +106,7 @@ class AutoencoderClient(fl.client.NumPyClient):
         print(f"Autoencoder created:")
         print(f"  Total params: {self.model.count_params()}")
         original_size = self.model.count_params() * 4 / 1024
-        quantized_size = self.model.count_params() * 2 / 1024  # FP16 = 2 bytes
+        quantized_size = self.model.count_params() * 2 / 1024
         print(f"  Model size (FP32): ~{original_size:.2f} KB")
         print(f"  Model size (FP16): ~{quantized_size:.2f} KB")
         print(f"  Compression: {original_size/quantized_size:.2f}x")
@@ -129,7 +124,7 @@ class AutoencoderClient(fl.client.NumPyClient):
         if self.use_quantization:
             parameters = dequantize_weights_fp16(parameters)
         self.model.set_weights(parameters)
-        print(f"  Applied {len(parameters)} weight matrices from server (FP16 → FP32)")
+        print(f"  Applied {len(parameters)} weight matrices from server (FP16 -> FP32)")
     
     def fit(self, parameters, config):
         """Train autoencoder on normal data"""
@@ -138,16 +133,13 @@ class AutoencoderClient(fl.client.NumPyClient):
         
         print(f"\n--- Client {self.client_id} - Round {self.current_round} Training ---")
         
-        # Apply global weights
         if parameters:
             self.set_parameters(parameters)
         
-        # Get global threshold from config if available
         if 'global_threshold' in config:
             self.global_threshold = config['global_threshold']
             print(f"  Using global threshold: {self.global_threshold:.6f}")
         
-        # Early stopping callback
         early_stopping = keras.callbacks.EarlyStopping(
             monitor='val_loss',
             patience=3,
@@ -155,10 +147,9 @@ class AutoencoderClient(fl.client.NumPyClient):
             min_delta=0.0001
         )
         
-        # Train with early stopping
         history = self.model.fit(
             self.X_train, self.X_train,
-            epochs=20,  # Increased but with early stopping
+            epochs=20,
             batch_size=32,
             verbose=0,
             validation_split=0.1,
@@ -168,14 +159,11 @@ class AutoencoderClient(fl.client.NumPyClient):
         training_time = time.time() - start_time
         final_loss = history.history['loss'][-1]
         
-        # Calculate reconstruction error on training data
         train_reconstructions = self.model.predict(self.X_train, verbose=0)
         train_mse = np.mean(np.square(self.X_train - train_reconstructions), axis=1)
         
-        # Calculate local threshold
         local_threshold = np.percentile(train_mse, 95)
         
-        # Use global threshold if available, otherwise use local
         if self.global_threshold is not None:
             self.threshold = self.global_threshold
             print(f"  Using global threshold: {self.threshold:.6f}")
@@ -187,10 +175,12 @@ class AutoencoderClient(fl.client.NumPyClient):
         print(f"  Final loss: {final_loss:.6f}")
         print(f"  Epochs trained: {len(history.history['loss'])}")
         
+        # Sends client_id in both fit() and evaluate()
         return self.get_parameters(config={}), len(self.X_train), {
+            "client_id": self.client_id,  # ✅ ADDED MISSING COMMA HERE
             "training_time": training_time,
             "final_loss": float(final_loss),
-            "threshold": float(local_threshold),  # Send local threshold to server
+            "threshold": float(local_threshold),
             "epochs_trained": len(history.history['loss'])
         }
     
@@ -201,7 +191,6 @@ class AutoencoderClient(fl.client.NumPyClient):
         if parameters:
             self.set_parameters(parameters)
         
-        # If threshold not set yet (before first training), calculate a default one
         if self.threshold is None:
             print(f"  Threshold not set yet - calculating default threshold...")
             train_reconstructions = self.model.predict(self.X_train, verbose=0)
@@ -209,29 +198,24 @@ class AutoencoderClient(fl.client.NumPyClient):
             self.threshold = np.percentile(train_mse, 95)
             print(f"  Default threshold: {self.threshold:.6f}")
         
-        # Get reconstructions
         test_reconstructions = self.model.predict(self.X_test_scaled, verbose=0)
-        
-        # Calculate reconstruction errors (MSE per sample)
         reconstruction_errors = np.mean(np.square(self.X_test_scaled - test_reconstructions), axis=1)
         
-        # Predict: error > threshold = anomaly (-1), else normal (1)
         predictions = np.where(reconstruction_errors > self.threshold, -1, 1)
         
-        # Debug info
         n_predicted_anomaly = np.sum(predictions == -1)
         print(f"  Reconstruction error range: [{reconstruction_errors.min():.6f}, {reconstruction_errors.max():.6f}]")
         print(f"  Threshold: {self.threshold:.6f}")
         print(f"  Predicted anomalies: {n_predicted_anomaly}/{len(predictions)}")
         
-        # Convert to binary for metrics
         y_pred_binary = (predictions == -1).astype(int)
         y_true_binary = (self.y_test == -1).astype(int)
         
-        # Calculate metrics
         metrics = self._calculate_metrics(y_true_binary, y_pred_binary, reconstruction_errors)
         
-        # Loss = average reconstruction error
+        # ✅ FIX: Send client_id in evaluation metrics too
+        metrics["client_id"] = self.client_id  # ✅ int
+        
         loss = float(np.mean(reconstruction_errors))
         
         print(f"  Accuracy: {metrics['accuracy']:.4f}")
@@ -242,7 +226,6 @@ class AutoencoderClient(fl.client.NumPyClient):
     
     def _calculate_metrics(self, y_true, y_pred, reconstruction_errors):
         """Calculate comprehensive metrics"""
-        # ...existing code from client.py _calculate_metrics...
         accuracy = accuracy_score(y_true, y_pred)
         precision = precision_score(y_true, y_pred, zero_division=0)
         recall = recall_score(y_true, y_pred, zero_division=0)
