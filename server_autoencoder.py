@@ -1,7 +1,15 @@
+# -*- coding: utf-8 -*-
 """
 Federated Learning Server for Autoencoder-based IoT Anomaly Detection
 With proper client identification and synchronization
 """
+
+import sys
+import io
+# Force UTF-8 encoding for Windows console
+if sys.platform == 'win32':
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
 
 import flwr as fl
 import json
@@ -89,7 +97,7 @@ class AutoencoderStrategy(fl.server.strategy.FedAvg):
         if not results:
             return None, {}
         
-        # ✅ FIX: Extract client IDs from metrics (not from order!)
+        # Extract client IDs from metrics (not from order!)
         all_weights_list = []
         all_num_examples = []
         client_ids = []
@@ -106,7 +114,7 @@ class AutoencoderStrategy(fl.server.strategy.FedAvg):
             if client_id is None:
                 # Fallback with warning
                 client_id = len(client_ids) + 1
-                print(f"⚠️  WARNING: Client didn't send ID, assigning temporary ID: {client_id}")
+                print(f"[WARNING] Client didn't send ID, assigning temporary ID: {client_id}")  # FIXED
             
             client_id = f"client_{client_id}"
             client_ids.append(client_id)
@@ -126,7 +134,7 @@ class AutoencoderStrategy(fl.server.strategy.FedAvg):
                     client_results.append((client_id, all_num_examples[idx], metrics))
                 else:
                     # New client joining - use default weight
-                    print(f"  ⚠ New client {client_id} detected - using default weight")
+                    print(f"  [WARNING] New client {client_id} detected - using default weight")  # FIXED
             
             if client_results:
                 dynamic_weights_dict = self.weight_calculator.calculate_dynamic_weights(client_results)
@@ -140,8 +148,8 @@ class AutoencoderStrategy(fl.server.strategy.FedAvg):
                         # New client gets average weight
                         avg_weight = 1.0 / len(client_ids)
                         dynamic_weights.append(avg_weight)
-                        print(f"  → {cid}: {avg_weight:.4f} (new client - default weight)")
-                
+                        print(f"  >> {cid}: {avg_weight:.4f} (new client - default weight)")  # FIXED: Changed → to >>
+
                 rationales = []
                 for client_id in client_ids:
                     if client_id in self.client_performance:
@@ -230,11 +238,8 @@ class AutoencoderStrategy(fl.server.strategy.FedAvg):
         if self.global_threshold is not None:
             config["global_threshold"] = self.global_threshold
         
-        # Get configuration from parent
-        fit_config = super().configure_fit(server_round, parameters, client_manager)
-        
-        # Return list of (ClientProxy, FitIns) tuples
-        return [(client, fl.common.FitIns(parameters, config)) for client, _ in fit_config] if fit_config else []
+        # ✅ FIXED: Simply return config, Flower handles the rest
+        return super().configure_fit(server_round, parameters, client_manager)
     
     def aggregate_evaluate(
         self,
@@ -270,9 +275,9 @@ class AutoencoderStrategy(fl.server.strategy.FedAvg):
         client_metrics = [(res.num_examples, res.metrics) for _, res in results if res.metrics]
         aggregated_metrics = weighted_average(client_metrics)
         
-        # Calculate aggregated confusion matrix - FIXED
+        # Calculate aggregated confusion matrix - ✅ FIXED
         total_tp = sum(res.metrics.get('true_positives', 0) for _, res in results if res.metrics)
-        total_tn = sum(res.metrics.get('true_negatives', 0) for _, res in results if res.metrics)  # ✅ FIXED
+        total_tn = sum(res.metrics.get('true_negatives', 0) for _, res in results if res.metrics)   # ✅ FIXED
         total_fp = sum(res.metrics.get('false_positives', 0) for _, res in results if res.metrics)  # ✅ FIXED
         total_fn = sum(res.metrics.get('false_negatives', 0) for _, res in results if res.metrics)  # ✅ FIXED
         

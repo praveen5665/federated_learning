@@ -1,7 +1,15 @@
+# -*- coding: utf-8 -*-
 """
 Federated Learning Dashboard - GUI for Server and Client Management
 Provides a unified interface to start/stop server and clients
 """
+
+import sys
+import io
+# Force UTF-8 encoding for Windows console
+if sys.platform == 'win32':
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
 
 import tkinter as tk
 from tkinter import ttk, scrolledtext, messagebox
@@ -9,7 +17,6 @@ import subprocess
 import threading
 import queue
 import os
-import sys
 import json
 from datetime import datetime
 
@@ -54,7 +61,7 @@ class FederatedLearningDashboard:
         
         title = tk.Label(
             title_frame,
-            text="🚀 Federated Learning Control Center",
+            text="[FL] Federated Learning Control Center",
             font=("Arial", 20, "bold"),
             bg='#34495E',
             fg='#ECF0F1',
@@ -82,7 +89,7 @@ class FederatedLearningDashboard:
     def setup_overview_tab(self):
         """Overview tab with system status"""
         overview_frame = tk.Frame(self.notebook, bg='#34495E')
-        self.notebook.add(overview_frame, text="📊 Overview")
+        self.notebook.add(overview_frame, text="[Overview]")
         
         # Status panel
         status_panel = tk.LabelFrame(
@@ -166,7 +173,7 @@ class FederatedLearningDashboard:
         
         tk.Button(
             btn_frame,
-            text="🚀 Start Full System",
+            text="[Start] Full System",
             font=("Arial", 12, "bold"),
             bg='#27AE60',
             fg='white',
@@ -178,7 +185,7 @@ class FederatedLearningDashboard:
         
         tk.Button(
             btn_frame,
-            text="🛑 Stop All",
+            text="[Stop] All",
             font=("Arial", 12, "bold"),
             bg='#E74C3C',
             fg='white',
@@ -190,7 +197,7 @@ class FederatedLearningDashboard:
         
         tk.Button(
             btn_frame,
-            text="📊 View Results",
+            text="[View] Results",
             font=("Arial", 12, "bold"),
             bg='#3498DB',
             fg='white',
@@ -203,7 +210,7 @@ class FederatedLearningDashboard:
     def setup_server_tab(self):
         """Server control tab"""
         server_frame = tk.Frame(self.notebook, bg='#34495E')
-        self.notebook.add(server_frame, text="🖥️ Server")
+        self.notebook.add(server_frame, text="[Server]")
         
         # Control panel
         control_panel = tk.LabelFrame(
@@ -244,7 +251,7 @@ class FederatedLearningDashboard:
         
         self.start_server_btn = tk.Button(
             btn_frame,
-            text="▶ Start Server",
+            text="[Start] Server",
             font=("Arial", 12, "bold"),
             bg='#27AE60',
             fg='white',
@@ -257,7 +264,7 @@ class FederatedLearningDashboard:
         
         self.stop_server_btn = tk.Button(
             btn_frame,
-            text="⏹ Stop Server",
+            text="[Stop] Server",
             font=("Arial", 12, "bold"),
             bg='#E74C3C',
             fg='white',
@@ -294,7 +301,7 @@ class FederatedLearningDashboard:
     def setup_clients_tab(self):
         """Clients control tab"""
         clients_frame = tk.Frame(self.notebook, bg='#34495E')
-        self.notebook.add(clients_frame, text="👥 Clients")
+        self.notebook.add(clients_frame, text="[Clients]")
         
         # Create sub-tabs for each client
         self.client_notebook = ttk.Notebook(clients_frame)
@@ -331,7 +338,7 @@ class FederatedLearningDashboard:
         
         start_btn = tk.Button(
             btn_frame,
-            text=f"▶ Start Client {client_id}",
+            text=f"[Start] Client {client_id}",
             font=("Arial", 11, "bold"),
             bg='#27AE60',
             fg='white',
@@ -345,7 +352,7 @@ class FederatedLearningDashboard:
         
         stop_btn = tk.Button(
             btn_frame,
-            text=f"⏹ Stop Client {client_id}",
+            text=f"[Stop] Client {client_id}",
             font=("Arial", 11, "bold"),
             bg='#E74C3C',
             fg='white',
@@ -384,7 +391,7 @@ class FederatedLearningDashboard:
     def setup_logs_tab(self):
         """Combined logs tab"""
         logs_frame = tk.Frame(self.notebook, bg='#34495E')
-        self.notebook.add(logs_frame, text="📝 All Logs")
+        self.notebook.add(logs_frame, text="[All Logs]")
         
         self.all_logs = scrolledtext.ScrolledText(
             logs_frame,
@@ -399,14 +406,14 @@ class FederatedLearningDashboard:
     def setup_results_tab(self):
         """Results visualization tab"""
         results_frame = tk.Frame(self.notebook, bg='#34495E')
-        self.notebook.add(results_frame, text="📈 Results")
+        self.notebook.add(results_frame, text="[Results]")
         
         control_frame = tk.Frame(results_frame, bg='#34495E')
         control_frame.pack(fill=tk.X, padx=10, pady=10)
         
         tk.Button(
             control_frame,
-            text="🔄 Refresh Results",
+            text="[Refresh] Results",
             font=("Arial", 11, "bold"),
             bg='#3498DB',
             fg='white',
@@ -418,7 +425,7 @@ class FederatedLearningDashboard:
         
         tk.Button(
             control_frame,
-            text="📊 Generate Metrics",
+            text="[Generate] Metrics",
             font=("Arial", 11, "bold"),
             bg='#9B59B6',
             fg='white',
@@ -430,7 +437,7 @@ class FederatedLearningDashboard:
         
         tk.Button(
             control_frame,
-            text="📁 Open Results Folder",
+            text="[Open] Results Folder",
             font=("Arial", 11, "bold"),
             bg='#16A085',
             fg='white',
@@ -465,9 +472,9 @@ class FederatedLearningDashboard:
                 missing.append(file)
         
         if missing:
-            self.log_all(f"⚠️ WARNING: Missing files:\n" + "\n".join(f"  - {f}" for f in missing), "warning")
+            self.log_all(f"[WARNING] Missing files:\n" + "\n".join(f"  - {f}" for f in missing), "warning")
         else:
-            self.log_all("✅ All prerequisites found!", "success")
+            self.log_all("[OK] All prerequisites found!", "success")
     
     def start_server(self):
         """Start the federated learning server"""
@@ -483,7 +490,7 @@ class FederatedLearningDashboard:
             messagebox.showerror("Error", "Please enter a valid number of rounds (>= 1)")
             return
         
-        self.log_server("🚀 Starting Federated Learning Server...")
+        self.log_server("[START] Federated Learning Server...")
         self.log_server(f"   Rounds: {rounds}")
         self.log_server(f"   Waiting for clients to connect...\n")
         
@@ -511,14 +518,14 @@ class FederatedLearningDashboard:
         self.start_server_btn.config(state=tk.DISABLED)
         self.stop_server_btn.config(state=tk.NORMAL)
         
-        self.log_all("🖥️ Server started successfully", "success")
+        self.log_all("[OK] Server started successfully", "success")
     
     def stop_server(self):
         """Stop the server"""
         if self.server_process is None:
             return
         
-        self.log_server("🛑 Stopping server...")
+        self.log_server("[STOP] Stopping server...")
         try:
             self.server_process.terminate()
             self.server_process.wait(timeout=5)
@@ -532,7 +539,7 @@ class FederatedLearningDashboard:
         self.start_server_btn.config(state=tk.NORMAL)
         self.stop_server_btn.config(state=tk.DISABLED)
         
-        self.log_all("🖥️ Server stopped", "info")
+        self.log_all("[OK] Server stopped", "info")
     
     def start_client(self, client_id):
         """Start a specific client"""
@@ -546,7 +553,7 @@ class FederatedLearningDashboard:
             messagebox.showerror("Error", f"Client {client_id} data not found!\nRun: python split_client_data.py")
             return
         
-        self.log_client(client_id, f"🚀 Starting Client {client_id}...")
+        self.log_client(client_id, f"[START] Client {client_id}...")
         
         # Start client process
         cmd = [sys.executable, "client_autoencoder.py", str(client_id)]
@@ -574,14 +581,14 @@ class FederatedLearningDashboard:
         self.client_start_btns[client_id].config(state=tk.DISABLED)
         self.client_stop_btns[client_id].config(state=tk.NORMAL)
         
-        self.log_all(f"👤 Client {client_id} started", "success")
+        self.log_all(f"[OK] Client {client_id} started", "success")
     
     def stop_client(self, client_id):
         """Stop a specific client"""
         if client_id not in self.client_processes:
             return
         
-        self.log_client(client_id, f"🛑 Stopping Client {client_id}...")
+        self.log_client(client_id, f"[STOP] Client {client_id}...")
         
         try:
             self.client_processes[client_id].terminate()
@@ -596,7 +603,7 @@ class FederatedLearningDashboard:
         self.client_start_btns[client_id].config(state=tk.NORMAL)
         self.client_stop_btns[client_id].config(state=tk.DISABLED)
         
-        self.log_all(f"👤 Client {client_id} stopped", "info")
+        self.log_all(f"[OK] Client {client_id} stopped", "info")
     
     def start_full_system(self):
         """Start server and all clients"""
@@ -605,12 +612,12 @@ class FederatedLearningDashboard:
             self.start_server()
         
         # Wait 5 seconds for server to actually start listening (increased from 2)
-        self.log_all("⏳ Waiting 5 seconds for server to start listening...", "info")
+        self.log_all("[WAIT] Waiting 5 seconds for server to start listening...", "info")
         self.root.after(5000, self._start_all_clients)  # Changed from 2000 to 5000
     
     def _start_all_clients(self):
         """Helper to start all clients with delay"""
-        self.log_all("🚀 Starting clients now...", "info")
+        self.log_all("[START] Starting clients now...", "info")
         for i in range(1, self.max_clients + 1):
             if i not in self.client_processes:
                 if os.path.exists(f"data/processed/client{i}_data.csv"):
@@ -628,7 +635,7 @@ class FederatedLearningDashboard:
         if self.server_process is not None:
             self.stop_server()
         
-        self.log_all("🛑 All processes stopped", "info")
+        self.log_all("[STOP] All processes stopped", "info")
     
     def read_process_output(self, process, output_queue, prefix):
         """Read process output in separate thread"""
@@ -716,7 +723,7 @@ class FederatedLearningDashboard:
     
     def generate_results(self):
         """Generate metrics and visualizations"""
-        self.log_all("📊 Generating results...", "info")
+        self.log_all("[INFO] Generating results...", "info")
         
         try:
             result = subprocess.run(
@@ -727,17 +734,17 @@ class FederatedLearningDashboard:
             )
             
             if result.returncode == 0:
-                self.log_all("✅ Results generated successfully!", "success")
+                self.log_all("[OK] Results generated successfully!", "success")
                 self.load_results()
                 messagebox.showinfo("Success", "Metrics generated successfully!\nCheck the 'Results' tab.")
             else:
-                self.log_all(f"❌ Error generating results:\n{result.stderr}", "error")
+                self.log_all(f"[ERROR] Error generating results:\n{result.stderr}", "error")
                 messagebox.showerror("Error", f"Failed to generate results:\n{result.stderr[:500]}")
         except subprocess.TimeoutExpired:
-            self.log_all("⏱️ Timeout while generating results", "warning")
+            self.log_all("[WARNING] Timeout while generating results", "warning")
             messagebox.showwarning("Timeout", "Result generation timed out.")
         except Exception as e:
-            self.log_all(f"❌ Error: {e}", "error")
+            self.log_all(f"[ERROR] Error: {e}", "error")
             messagebox.showerror("Error", str(e))
     
     def load_results(self):
@@ -757,7 +764,7 @@ class FederatedLearningDashboard:
             
             # Display summary
             self.results_text.delete(1.0, tk.END)
-            self.results_text.insert(tk.END, f"📄 Latest Results: {latest}\n\n", "header")
+            self.results_text.insert(tk.END, f"[RESULTS] Latest Results: {latest}\n\n", "header")
             
             self.results_text.insert(tk.END, f"Experiment ID: {data.get('experiment_id', 'N/A')}\n")
             self.results_text.insert(tk.END, f"Model Type: {data.get('model_type', 'N/A')}\n")
