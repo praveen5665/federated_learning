@@ -96,23 +96,35 @@ if len(cols) != 46:
 print(f"Initial features available: {len(cols)}")
 print(f"Feature names: {cols[:5]}... (showing first 5)")
 
-# Create test set for feature selection (mixed normal + attack)
+# Create dataset for feature selection using TRAINING data (avoid data leakage)
 print("\n" + "="*50)
 print("FEATURE SELECTION using Random Forest")
 print("="*50)
-print("Preparing mixed test data for feature selection...")
-if len(df_benign_test) > 0:
-    test_mixed_for_selection = pd.concat([df_benign_test, df_attack_test], ignore_index=True)
-else:
-    # If no benign test samples, use only attack samples
-    test_mixed_for_selection = df_attack_test.copy()
+print("Preparing training data for feature selection (no data leakage)...")
+
+# Sample some attack data from the NON-test pool for feature selection only
+# This avoids using test data for any training/selection purpose
+df_attack_for_selection = df_all_attack.drop(
+    df_all_attack.sample(n=n_attack_test, random_state=42).index
+).reset_index(drop=True)
+
+# Use a balanced subset: equal benign + attack from training pool
+n_selection_samples = min(10000, len(df_benign_train), len(df_attack_for_selection))
+df_benign_selection = df_benign_train.sample(n=n_selection_samples, random_state=42).reset_index(drop=True)
+df_attack_selection = df_attack_for_selection.sample(n=n_selection_samples, random_state=42).reset_index(drop=True)
+
+# Label them for the classifier
+df_benign_selection['label'] = 1
+df_attack_selection['label'] = -1
+
+train_mixed_for_selection = pd.concat([df_benign_selection, df_attack_selection], ignore_index=True)
 
 # Prepare data for Random Forest feature selection
-X_mixed = test_mixed_for_selection[cols].copy()
+X_mixed = train_mixed_for_selection[cols].copy()
 X_mixed = X_mixed.fillna(0)
-y_mixed = test_mixed_for_selection['label'].copy()
+y_mixed = train_mixed_for_selection['label'].copy()
 
-print(f"Using mixed test data with {len(X_mixed)} samples for feature selection")
+print(f"Using TRAINING data with {len(X_mixed)} samples for feature selection")
 print(f"  - Normal (label=1): {len(y_mixed[y_mixed==1])}")
 print(f"  - Anomaly (label=-1): {len(y_mixed[y_mixed==-1])}")
 
@@ -227,6 +239,6 @@ print(f"Selected features list saved: data/processed/selected_features.csv")
 print("="*50)
 print("Note: One-Class SVM will be trained on normal data only.")
 print("      Outliers detected during testing will be classified as attacks.")
-print("      Feature selection was performed using Random Forest on mixed test data.")
+print("      Feature selection was performed using Random Forest on training data (no leakage).")
 print("="*50)
 

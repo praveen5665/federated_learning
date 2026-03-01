@@ -7,7 +7,7 @@ With proper client identification and synchronization
 import sys
 import io
 # Force UTF-8 encoding for Windows console
-if sys.platform == 'win32':
+if sys.platform == 'win32': 
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
     sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
 
@@ -18,7 +18,10 @@ import numpy as np
 import time
 from datetime import datetime
 from typing import List, Tuple, Dict, Optional
-from flwr.common import Metrics, Parameters, FitRes, EvaluateRes, ndarrays_to_parameters, parameters_to_ndarrays
+from flwr.common import (
+    Metrics, Parameters, FitRes, EvaluateRes, FitIns,
+    ndarrays_to_parameters, parameters_to_ndarrays
+)
 from flwr.server.client_proxy import ClientProxy
 from flwr.server.client_manager import ClientManager
 from quantization_utils import (
@@ -59,7 +62,7 @@ def weighted_average(metrics: List[Tuple[int, Metrics]]) -> Metrics:
 
 class AutoencoderStrategy(fl.server.strategy.FedAvg):
     """FedAvg strategy with FP16 Quantization, Dynamic Weighting, and Client Synchronization"""
-    
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.round_results = []
@@ -67,179 +70,246 @@ class AutoencoderStrategy(fl.server.strategy.FedAvg):
         self.global_threshold = None
         self.use_quantization = True
         self.quantization_stats = []
-        
+
         # Dynamic weighting setup
         self.use_dynamic_weights = True
         self.weight_calculator = DynamicWeightCalculator(
-            alpha=0.4,   # 40% weight on accuracy
-            beta=0.3,    # 30% weight on F1-score
-            gamma=0.2,   # 20% weight on loss
-            delta=0.1,   # 10% weight on AUC-ROC
+            alpha=0.4,
+            beta=0.3,
+            gamma=0.2,
+            delta=0.1,
             min_weight=0.05,
             smoothing=0.7
         )
-        self.client_performance = {}  # Track performance per client
-        self.weight_history = []  # Track weight evolution
-        self.known_clients = set()  # Track all clients ever seen
-        
-        print(f"Autoencoder Experiment ID: {self.experiment_id}")
-        print(f"Quantization: FP16 (16-bit) Enabled")
-        print(f"Dynamic Weighting: Hybrid (Accuracy:40%, F1:30%, Loss:20%, AUC:10%)")
-        print(f"Client Synchronization: 20 second wait before first round")
-    
+        self.client_performance = {}
+        self.weight_history = []
+        self.known_clients = set()
+
+        # -------- FedBuff state --------
+        self.fedbuff_enabled = True
+        self.fedbuff_buffer_size = int(os.getenv("FEDBUFF_K", "5"))
+        self.fedbuff_min_updates = int(os.getenv("FEDBUFF_MIN_UPDATES", "2"))
+        self.fedbuff_staleness_alpha = float(os.getenv("FEDBUFF_STALENESS_ALPHA", "0.5"))
+        self.fedbuff_server_lr = float(os.getenv("FEDBUFF_ETA", "0.8"))
+
+        self.update_buffer = []  # queued client updates
+        self.global_version = 0  # server model version
+        self.current_global_weights = None
+        self.current_round_contributions = {}
+        # -------------------------------
+
+    def configure_fit(
+        self, server_round: int, parameters: Parameters, client_manager: ClientManager
+    ):
+        """Configure the next round of training and inject server version/config."""
+        client_instructions = super().configure_fit(server_round, parameters, client_manager)
+
+        fit_config = {"server_version": self.global_version}
+        if self.global_threshold is not None:
+            fit_config["global_threshold"] = float(self.global_threshold)
+
+        updated_instructions = []
+        for client_proxy, fit_ins in client_instructions:
+            merged = dict(fit_ins.config) if fit_ins.config is not None else {}
+            merged.update(fit_config)
+            updated_instructions.append((client_proxy, FitIns(fit_ins.parameters, merged)))
+
+        return updated_instructions
+
+    def _print_async_status(self, version: int, buffered: int, applied: int, avg_staleness: float) -> None:
+        """Emit a parseable async status line for dashboard."""
+        fedbuff_flag = 1 if getattr(self, "fedbuff_enabled", False) else 0
+        print(
+            f"[ASYNC] fedbuff={fedbuff_flag} "
+            f"version={version} buffered={buffered} applied={applied} "
+            f"avg_staleness={avg_staleness:.4f}"
+        )
+
     def aggregate_fit(
         self,
         server_round: int,
         results: List[Tuple[ClientProxy, FitRes]],
         failures: List[BaseException],
     ) -> Tuple[Optional[Parameters], Dict[str, float]]:
-        """Aggregate neural network weights with proper client identification"""
+        """FedBuff-style buffered aggregation with optional dynamic + staleness weights."""
         if not results:
-            return None, {}
-        
-        # Extract client IDs from metrics (not from order!)
-        all_weights_list = []
-        all_num_examples = []
-        client_ids = []
-        
+            if self.current_global_weights is None:
+                return None, {}
+            if self.use_quantization:
+                out_weights, _ = quantize_weights_fp16(self.current_global_weights)
+            else:
+                out_weights = self.current_global_weights
+            self._print_async_status(
+                version=int(getattr(self, "global_version", 0)),
+                buffered=int(len(getattr(self, "update_buffer", []))),
+                applied=0,
+                avg_staleness=0.0,
+            )
+            return ndarrays_to_parameters(out_weights), {
+                "buffered_updates": float(len(self.update_buffer)),
+                "applied_updates": 0.0,
+                "global_version": float(self.global_version),
+            }
+
+        # 1) Push incoming updates into buffer
         for client_proxy, fit_res in results:
             weights = parameters_to_ndarrays(fit_res.parameters)
             if self.use_quantization:
                 weights = dequantize_weights_fp16(weights)
-            all_weights_list.append(weights)
-            all_num_examples.append(fit_res.num_examples)
-            
-            # Read client_id with validation
-            client_id = fit_res.metrics.get("client_id")
-            if client_id is None:
-                # Fallback with warning
-                client_id = len(client_ids) + 1
-                print(f"[WARNING] Client didn't send ID, assigning temporary ID: {client_id}")  # FIXED
-            
-            client_id = f"client_{client_id}"
-            client_ids.append(client_id)
-            self.known_clients.add(client_id)
-        
-        print(f"\n{'='*60}")
-        print(f"Round {server_round} - Participating Clients: {sorted(client_ids)}")
-        print(f"  Total clients ever seen: {len(self.known_clients)}")
-        print(f"{'='*60}")
-        
-        # Calculate dynamic weights if enabled and past first round
-        if self.use_dynamic_weights and server_round > 1 and self.client_performance:
-            client_results = []
-            for idx, client_id in enumerate(client_ids):
-                if client_id in self.client_performance:
-                    metrics = self.client_performance[client_id]
-                    client_results.append((client_id, all_num_examples[idx], metrics))
-                else:
-                    # New client joining - use default weight
-                    print(f"  [WARNING] New client {client_id} detected - using default weight")  # FIXED
-            
-            if client_results:
-                dynamic_weights_dict = self.weight_calculator.calculate_dynamic_weights(client_results)
-                
-                # Assign weights (including default for new clients)
-                dynamic_weights = []
-                for idx, cid in enumerate(client_ids):
-                    if cid in dynamic_weights_dict:
-                        dynamic_weights.append(dynamic_weights_dict[cid])
-                    else:
-                        # New client gets average weight
-                        avg_weight = 1.0 / len(client_ids)
-                        dynamic_weights.append(avg_weight)
-                        print(f"  >> {cid}: {avg_weight:.4f} (new client - default weight)")  # FIXED: Changed → to >>
 
-                rationales = []
-                for client_id in client_ids:
-                    if client_id in self.client_performance:
-                        rationale = self.weight_calculator.get_weight_rationale(
-                            client_id,
-                            self.client_performance[client_id],
-                            dynamic_weights_dict.get(client_id, 0)
-                        )
-                        rationales.append(rationale)
-                
-                print_dynamic_weights_summary(dynamic_weights_dict, rationales, server_round)
-                
-                self.weight_history.append({
-                    "round": server_round,
-                    "weights": dynamic_weights_dict,
-                    "rationales": rationales
-                })
+            raw_client_id = fit_res.metrics.get("client_id") if fit_res.metrics else None
+            if raw_client_id is None:
+                raw_client_id = getattr(client_proxy, "cid", "unknown")
+            client_id = f"client_{raw_client_id}"
+            self.known_clients.add(client_id)
+
+            base_version = int((fit_res.metrics or {}).get("base_version", self.global_version))
+
+            self.update_buffer.append({
+                "client_id": client_id,
+                "weights": weights,
+                "num_examples": int(fit_res.num_examples),
+                "base_version": base_version,
+            })
+
+        # 2) Consume up to K buffered updates
+        consume_n = min(len(self.update_buffer), self.fedbuff_buffer_size)
+
+        # CASE: buffer not yet ready to apply
+        if consume_n < self.fedbuff_min_updates and self.current_global_weights is not None:
+            if self.use_quantization:
+                out_weights, _ = quantize_weights_fp16(self.current_global_weights)
             else:
-                # All clients are new - use FedAvg
-                total_examples = sum(all_num_examples)
-                dynamic_weights = [n / total_examples for n in all_num_examples]
+                out_weights = self.current_global_weights
+            self._print_async_status(
+                version=int(self.global_version),
+                buffered=int(len(self.update_buffer)),
+                applied=0,
+                avg_staleness=0.0,
+            )
+            return ndarrays_to_parameters(out_weights), {
+                "buffered_updates": float(len(self.update_buffer)),
+                "applied_updates": 0.0,
+                "global_version": float(self.global_version),
+            }
+
+        selected = [self.update_buffer.pop(0) for _ in range(consume_n)]
+
+        client_ids = [u["client_id"] for u in selected]
+        all_num_examples = [u["num_examples"] for u in selected]
+        all_weights_list = [u["weights"] for u in selected]
+
+        # 3) Base weights (dynamic if available, else data-weighted)
+        if (
+            self.use_dynamic_weights
+            and server_round > 1
+            and all(cid in self.client_performance for cid in client_ids)
+        ):
+            client_results_for_weights = [
+                (cid, n_examples, self.client_performance[cid])
+                for cid, n_examples in zip(client_ids, all_num_examples)
+            ]
+            dyn_dict = self.weight_calculator.calculate_dynamic_weights(
+                client_results_for_weights,
+                use_data_size=True,
+            )
+            base_weights = [dyn_dict.get(cid, 0.0) for cid in client_ids]
+
+            if sum(base_weights) <= 0:
+                total_examples = max(sum(all_num_examples), 1)
+                base_weights = [n / total_examples for n in all_num_examples]
+
+            rationales = []
+            for cid in client_ids:
+                rationales.append(
+                    self.weight_calculator.get_weight_rationale(
+                        cid, self.client_performance[cid], dyn_dict.get(cid, 0.0)
+                    )
+                )
+            print_dynamic_weights_summary(dyn_dict, rationales, server_round)
+            self.weight_history.append({
+                "round": server_round,
+                "weights": dyn_dict,
+                "rationales": rationales
+            })
         else:
-            # Use standard FedAvg for first round
-            total_examples = sum(all_num_examples)
-            dynamic_weights = [n / total_examples for n in all_num_examples]
-            print(f"  Using FedAvg (Round {server_round}): Data-weighted averaging")
-        
-        # Aggregate with dynamic weights
-        aggregated_weights = []
+            total_examples = max(sum(all_num_examples), 1)
+            base_weights = [n / total_examples for n in all_num_examples]
+
+        # 4) Staleness scaling
+        staleness_factors = []
+        for u in selected:
+            stale = max(0, self.global_version - int(u["base_version"]))
+            staleness_factors.append(1.0 / (1.0 + self.fedbuff_staleness_alpha * stale))
+
+        fedbuff_weights = [bw * sf for bw, sf in zip(base_weights, staleness_factors)]
+        s = sum(fedbuff_weights)
+        if s <= 0:
+            fedbuff_weights = [1.0 / len(fedbuff_weights)] * len(fedbuff_weights)
+        else:
+            fedbuff_weights = [w / s for w in fedbuff_weights]
+
+        # 5) Aggregate selected buffered updates
+        buffered_agg = []
         for layer_idx in range(len(all_weights_list[0])):
-            layer_weights = [weights[layer_idx] * weight 
-                           for weights, weight in zip(all_weights_list, dynamic_weights)]
-            aggregated_weights.append(np.sum(layer_weights, axis=0))
-        
-        # Quantize aggregated weights to FP16
-        if self.use_quantization:
-            original_weights = aggregated_weights.copy()
-            aggregated_weights, quant_stats = quantize_weights_fp16(aggregated_weights)
-            error_metrics = calculate_quantization_error(original_weights, aggregated_weights)
-            quant_stats.update(error_metrics)
-            self.quantization_stats.append(quant_stats)
-            print_quantization_stats(quant_stats, error_metrics)
-        
-        # Calculate global threshold (weighted average)
-        thresholds = [fit_res.metrics.get("threshold", 0) for _, fit_res in results]
-        weights_for_threshold = [fit_res.num_examples for _, fit_res in results]
-        self.global_threshold = float(np.average(thresholds, weights=weights_for_threshold))
-        
-        # Stats
-        avg_loss = np.mean([fit_res.metrics.get("final_loss", 0) for _, fit_res in results])
-        avg_epochs = np.mean([fit_res.metrics.get("epochs_trained", 10) for _, fit_res in results])
-        
-        print(f"\n{'='*60}")
-        print(f"Round {server_round} - Autoencoder Aggregation")
-        print(f"  Clients: {len(results)}")
-        print(f"  Weighting: {'Dynamic (Performance-Based)' if self.use_dynamic_weights and server_round > 1 else 'FedAvg (Data Size)'}")
-        print(f"  Avg training loss: {avg_loss:.6f}")
-        print(f"  Global threshold: {self.global_threshold:.6f}")
-        print(f"  Avg epochs trained: {avg_epochs:.1f}")
-        print(f"  Weight matrices: {len(aggregated_weights)}")
-        if self.use_quantization:
-            print(f"  Model size (FP16): {quant_stats['quantized_size_kb']:.2f} KB")
-            print(f"  Compression: {quant_stats['compression_ratio']:.2f}x")
-        print(f"{'='*60}")
-        
-        # Store client contributions
-        client_contributions = {client_ids[i]: float(dynamic_weights[i]) 
-                              for i in range(len(client_ids))}
-        self.current_round_contributions = client_contributions
-        
-        return ndarrays_to_parameters(aggregated_weights), {
-            "num_clients": len(results),
-            "avg_loss": float(avg_loss),
-            "global_threshold": self.global_threshold,
-            "quantized": self.use_quantization,
-            "dynamic_weights": self.use_dynamic_weights
+            layer_sum = np.zeros_like(all_weights_list[0][layer_idx], dtype=np.float32)
+            for w_i, alpha_i in zip(all_weights_list, fedbuff_weights):
+                layer_sum += w_i[layer_idx] * alpha_i
+            buffered_agg.append(layer_sum)
+
+        # 6) Server update step
+        if self.current_global_weights is None:
+            new_global = buffered_agg
+        else:
+            eta = self.fedbuff_server_lr
+            new_global = [
+                (1.0 - eta) * g + eta * b
+                for g, b in zip(self.current_global_weights, buffered_agg)
+            ]
+
+        self.current_global_weights = new_global
+        self.global_version += 1
+        self.current_round_contributions = {
+            cid: float(w) for cid, w in zip(client_ids, fedbuff_weights)
         }
-    
-    def configure_fit(
-        self, server_round: int, parameters: Parameters, client_manager: ClientManager
-    ):
-        """Configure the next round of training"""
-        config = {}
-        
-        # Send global threshold to clients after first round
-        if self.global_threshold is not None:
-            config["global_threshold"] = self.global_threshold
-        
-        # ✅ FIXED: Simply return config, Flower handles the rest
-        return super().configure_fit(server_round, parameters, client_manager)
+
+        # 7) Quantize for transport
+        if self.use_quantization:
+            out_weights, quant_stats = quantize_weights_fp16(new_global)
+            quant_error = calculate_quantization_error(new_global, out_weights)
+
+            # Warn if quantization error is too high
+            mean_rel_err = quant_error.get('mean_relative_error_percent', 0)
+            if mean_rel_err > 1.0:
+                print(f"  [WARNING] High quantization error: {mean_rel_err:.4f}% "
+                      f"(threshold: 1.0%). Consider using FP32 for this round.")
+
+            self.quantization_stats.append({
+                "round": server_round,
+                "compression_ratio": quant_stats.get("compression_ratio", 1.0),
+                "error": quant_error,
+                "buffered_updates": consume_n,
+            })
+            out_params = ndarrays_to_parameters(out_weights)
+        else:
+            out_params = ndarrays_to_parameters(new_global)
+
+        avg_staleness = float(np.mean([max(0, self.global_version - 1 - u["base_version"]) for u in selected]))
+
+        # Emit async telemetry for dashboard parsing
+        self._print_async_status(
+            version=int(self.global_version),
+            buffered=int(len(self.update_buffer)),
+            applied=int(consume_n),
+            avg_staleness=avg_staleness,
+        )
+
+        return out_params, {
+            "buffered_updates": float(len(self.update_buffer)),
+            "applied_updates": float(consume_n),
+            "global_version": float(self.global_version),
+            "avg_staleness": avg_staleness,
+        }
     
     def aggregate_evaluate(
         self,
@@ -250,7 +320,7 @@ class AutoencoderStrategy(fl.server.strategy.FedAvg):
         """Aggregate evaluation results and update client performance tracking"""
         if not results:
             return None, {}
-        
+
         # ✅ FIX: Store individual client performance using actual client_id
         for client_proxy, eval_res in results:
             # Read client_id from metrics

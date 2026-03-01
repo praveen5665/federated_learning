@@ -21,6 +21,10 @@ from quantization_utils import quantize_weights_fp16, dequantize_weights_fp16
 
 warnings.filterwarnings('ignore')
 
+# Set seeds for reproducibility
+np.random.seed(42)
+tf.random.set_seed(42)
+
 # Disable GPU if not available (for IoT devices)
 tf.config.set_visible_devices([], 'GPU')
 
@@ -42,7 +46,7 @@ print(f"\n{'='*50}")
 print(f"CLIENT {client_id} - Autoencoder Federated Learning")
 print(f"{'='*50}")
 
-# Load data
+# Load data (already scaled by preprocess_data.py using global StandardScaler)
 data = pd.read_csv(client_data_file)
 X_train = data[selected_features].values.astype(np.float32)
 y_train = data['label'].values
@@ -50,16 +54,20 @@ y_train = data['label'].values
 print(f"Training samples: {len(X_train)}")
 print(f"Features: {X_train.shape[1]}")
 
-# Normalize data (important for neural networks)
-from sklearn.preprocessing import StandardScaler
-scaler = StandardScaler()
-X_train_scaled = scaler.fit_transform(X_train)
+# Load the global scaler fitted during preprocessing (for consistent test-time transforms)
+import joblib
+scaler = joblib.load('scaler.pkl')
 
-print(f"Data normalized for neural network")
+# Data is already scaled — use directly (no re-fitting)
+X_train_scaled = X_train
+
+print(f"Using pre-scaled data (global scaler loaded from scaler.pkl)")
 print(f"{'='*50}\n")
 
 
-def create_autoencoder(input_dim=20):
+def create_autoencoder(input_dim=None):
+    if input_dim is None:
+        input_dim = len(selected_features)
     """
     Create lightweight autoencoder for IoT devices with regularization
     Total params: ~2000 (very small!)
@@ -97,10 +105,10 @@ class AutoencoderClient(fl.client.NumPyClient):
         self.global_threshold = None
         self.use_quantization = True
         
-        # Load test data
+        # Load test data (already scaled by preprocess_data.py with global scaler)
         test_data = pd.read_csv("data/processed/test_data.csv")
         self.X_test = test_data[selected_features].values.astype(np.float32)
-        self.X_test_scaled = scaler.transform(self.X_test)
+        self.X_test_scaled = self.X_test  # Already scaled, use directly
         self.y_test = test_data['label'].values
         
         print(f"Autoencoder created:")
@@ -130,6 +138,7 @@ class AutoencoderClient(fl.client.NumPyClient):
         """Train autoencoder on normal data"""
         self.current_round += 1
         start_time = time.time()
+        base_version = -1
         
         print(f"\n--- Client {self.client_id} - Round {self.current_round} Training ---")
         
@@ -139,10 +148,17 @@ class AutoencoderClient(fl.client.NumPyClient):
         if 'global_threshold' in config:
             self.global_threshold = config['global_threshold']
             print(f"  Using global threshold: {self.global_threshold:.6f}")
+
+        if config and 'server_version' in config:
+            try:
+                base_version = int(config['server_version'])
+            except (TypeError, ValueError):
+                base_version = -1
         
+        es_patience = int(os.environ.get('FL_ES_PATIENCE', '3'))
         early_stopping = keras.callbacks.EarlyStopping(
             monitor='val_loss',
-            patience=3,
+            patience=es_patience,
             restore_best_weights=True,
             min_delta=0.0001
         )
@@ -178,6 +194,7 @@ class AutoencoderClient(fl.client.NumPyClient):
         # Sends client_id in both fit() and evaluate()
         return self.get_parameters(config={}), len(self.X_train), {
             "client_id": self.client_id,  # ✅ ADDED MISSING COMMA HERE
+            "base_version": base_version,
             "training_time": training_time,
             "final_loss": float(final_loss),
             "threshold": float(local_threshold),

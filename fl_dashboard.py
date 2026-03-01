@@ -11,15 +11,15 @@ if sys.platform == 'win32':
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
     sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
 
+import re
 import tkinter as tk
 from tkinter import ttk, scrolledtext, messagebox
+import queue
 import subprocess
 import threading
-import queue
 import os
 import json
 from datetime import datetime
-
 
 class FederatedLearningDashboard:
     """Main GUI Dashboard for Federated Learning"""
@@ -28,12 +28,31 @@ class FederatedLearningDashboard:
         self.root = root
         self.root.title("Federated Learning Dashboard - IoT Anomaly Detection")
         self.root.geometry("1400x900")
-        self.root.configure(bg='#2C3E50')
+        self.root.configure(bg='#F3F6FB')
+
+        # Visual theme
+        self.colors = {
+            "bg": "#F3F6FB",
+            "surface": "#FFFFFF",
+            "surface_alt": "#EEF3FB",
+            "border": "#D7E1F0",
+            "text": "#1F2A3A",
+            "text_muted": "#6D7B91",
+            "success": "#1FA97A",
+            "danger": "#E45858",
+            "warning": "#E9A23B",
+            "info": "#3D7BEB",
+            "purple": "#7567F8",
+            "teal": "#1AA6A6",
+            "console": "#F8FAFD",
+            "console_server": "#197E58",
+            "console_client": "#1D5FCF"
+        }
         
         # Process tracking
         self.server_process = None
         self.client_processes = {}  # {client_id: process}
-        self.max_clients = 5
+        self.max_clients = 10  
         
         # Output queues for threading
         self.server_queue = queue.Queue()
@@ -43,41 +62,117 @@ class FederatedLearningDashboard:
         self.server_status = "Stopped"
         self.client_statuses = {i: "Stopped" for i in range(1, self.max_clients + 1)}
         
+        self.async_stats = {
+            "fedbuff": "N/A",
+            "version": "0",
+            "buffered": "0",
+            "applied": "0",
+            "avg_staleness": "0.0000",
+            "status": "Unknown",
+        }
+        self.async_labels = {}
+        
+        self.setup_theme()
         self.setup_ui()
         self.check_prerequisites()
         
         # Start queue monitoring
         self.root.after(100, self.process_queues)
+
+    def setup_theme(self):
+        """Configure ttk theme and shared styles"""
+        self.title_font = ("Segoe UI", 22, "bold")
+        self.section_font = ("Segoe UI", 12, "bold")
+        self.body_font = ("Segoe UI", 10)
+        self.code_font = ("Cascadia Code", 9)
+
+        style = ttk.Style()
+        style.theme_use('clam')
+
+        style.configure(
+            'TNotebook',
+            background=self.colors["bg"],
+            borderwidth=0,
+            tabmargins=[8, 8, 8, 0]
+        )
+        style.configure(
+            'TNotebook.Tab',
+            background=self.colors["surface_alt"],
+            foreground=self.colors["text_muted"],
+            padding=[20, 10],
+            font=('Segoe UI', 10, 'bold'),
+            borderwidth=1
+        )
+        style.map(
+            'TNotebook.Tab',
+            background=[('selected', self.colors["surface"]), ('active', self.colors["surface"])],
+            foreground=[('selected', self.colors["text"]), ('active', self.colors["text"])],
+        )
+
+        style.configure('Dark.TFrame', background=self.colors["surface"])
+        style.configure('Dark.TLabel', background=self.colors["surface"], foreground=self.colors["text"])
+
+    def create_primary_button(self, parent, text, command, color):
+        """Create consistently styled action button"""
+        return tk.Button(
+            parent,
+            text=text,
+            font=("Segoe UI Semibold", 10),
+            bg=color,
+            fg='white',
+            activebackground=color,
+            activeforeground='white',
+            relief=tk.FLAT,
+            bd=0,
+            padx=18,
+            pady=9,
+            command=command,
+            cursor='hand2',
+            highlightthickness=1,
+            highlightbackground=color,
+            disabledforeground="#B8C2D3"
+        )
     
     def setup_ui(self):
         """Setup the user interface"""
         # Main container with padding
-        main_container = tk.Frame(self.root, bg='#2C3E50')
-        main_container.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        main_container = tk.Frame(self.root, bg=self.colors["bg"])
+        main_container.pack(fill=tk.BOTH, expand=True, padx=18, pady=18)
         
         # Title
-        title_frame = tk.Frame(main_container, bg='#34495E', relief=tk.RAISED, bd=2)
-        title_frame.pack(fill=tk.X, pady=(0, 10))
+        title_frame = tk.Frame(
+            main_container,
+            bg=self.colors["surface"],
+            relief=tk.FLAT,
+            bd=1,
+            highlightthickness=1,
+            highlightbackground=self.colors["border"]
+        )
+        title_frame.pack(fill=tk.X, pady=(0, 14))
         
         title = tk.Label(
             title_frame,
-            text="[FL] Federated Learning Control Center",
-            font=("Arial", 20, "bold"),
-            bg='#34495E',
-            fg='#ECF0F1',
-            pady=15
+            text="Federated Learning Control Center",
+            font=self.title_font,
+            bg=self.colors["surface"],
+            fg=self.colors["text"],
+            pady=8
         )
         title.pack()
+
+        subtitle = tk.Label(
+            title_frame,
+            text="Model orchestration for server, clients, logs, and experiment results",
+            font=("Segoe UI", 10),
+            bg=self.colors["surface"],
+            fg=self.colors["text_muted"],
+            pady=0
+        )
+        subtitle.pack(pady=(0, 12))
         
         # Create notebook for tabs
         self.notebook = ttk.Notebook(main_container)
         self.notebook.pack(fill=tk.BOTH, expand=True)
-        
-        # Style configuration
-        style = ttk.Style()
-        style.theme_use('clam')
-        style.configure('TNotebook', background='#2C3E50')
-        style.configure('TNotebook.Tab', padding=[20, 10], font=('Arial', 10, 'bold'))
         
         # Create tabs
         self.setup_overview_tab()
@@ -88,31 +183,35 @@ class FederatedLearningDashboard:
     
     def setup_overview_tab(self):
         """Overview tab with system status"""
-        overview_frame = tk.Frame(self.notebook, bg='#34495E')
-        self.notebook.add(overview_frame, text="[Overview]")
+        overview_frame = tk.Frame(self.notebook, bg=self.colors["surface"])
+        self.notebook.add(overview_frame, text="Overview")
         
         # Status panel
         status_panel = tk.LabelFrame(
             overview_frame,
             text="System Status",
-            font=("Arial", 14, "bold"),
-            bg='#34495E',
-            fg='#ECF0F1',
+            font=self.section_font,
+            bg=self.colors["surface"],
+            fg=self.colors["text"],
+            bd=1,
+            relief=tk.FLAT,
+            highlightthickness=1,
+            highlightbackground=self.colors["border"],
             padx=20,
             pady=20
         )
-        status_panel.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        status_panel.pack(fill=tk.BOTH, expand=True, padx=12, pady=12)
         
         # Server status
-        server_frame = tk.Frame(status_panel, bg='#34495E')
+        server_frame = tk.Frame(status_panel, bg=self.colors["surface"])
         server_frame.pack(fill=tk.X, pady=10)
         
         tk.Label(
             server_frame,
             text="Server:",
-            font=("Arial", 12, "bold"),
-            bg='#34495E',
-            fg='#ECF0F1',
+            font=("Segoe UI", 11, "bold"),
+            bg=self.colors["surface"],
+            fg=self.colors["text"],
             width=15,
             anchor='w'
         ).pack(side=tk.LEFT, padx=5)
@@ -120,9 +219,9 @@ class FederatedLearningDashboard:
         self.server_status_label = tk.Label(
             server_frame,
             text="● Stopped",
-            font=("Arial", 12),
-            bg='#34495E',
-            fg='#E74C3C',
+            font=("Segoe UI", 11),
+            bg=self.colors["surface"],
+            fg=self.colors["danger"],
             width=20,
             anchor='w'
         )
@@ -131,15 +230,15 @@ class FederatedLearningDashboard:
         # Client statuses
         self.client_status_labels = {}
         for i in range(1, self.max_clients + 1):
-            client_frame = tk.Frame(status_panel, bg='#34495E')
+            client_frame = tk.Frame(status_panel, bg=self.colors["surface"])
             client_frame.pack(fill=tk.X, pady=5)
             
             tk.Label(
                 client_frame,
                 text=f"Client {i}:",
-                font=("Arial", 12),
-                bg='#34495E',
-                fg='#ECF0F1',
+                font=("Segoe UI", 11),
+                bg=self.colors["surface"],
+                fg=self.colors["text"],
                 width=15,
                 anchor='w'
             ).pack(side=tk.LEFT, padx=5)
@@ -147,9 +246,9 @@ class FederatedLearningDashboard:
             status_label = tk.Label(
                 client_frame,
                 text="● Stopped",
-                font=("Arial", 12),
-                bg='#34495E',
-                fg='#95A5A6',
+                font=("Segoe UI", 11),
+                bg=self.colors["surface"],
+                fg=self.colors["text_muted"],
                 width=20,
                 anchor='w'
             )
@@ -160,148 +259,119 @@ class FederatedLearningDashboard:
         actions_frame = tk.LabelFrame(
             overview_frame,
             text="Quick Actions",
-            font=("Arial", 14, "bold"),
-            bg='#34495E',
-            fg='#ECF0F1',
+            font=self.section_font,
+            bg=self.colors["surface"],
+            fg=self.colors["text"],
+            bd=1,
+            relief=tk.FLAT,
+            highlightthickness=1,
+            highlightbackground=self.colors["border"],
             padx=20,
             pady=20
         )
-        actions_frame.pack(fill=tk.X, padx=10, pady=10)
+        actions_frame.pack(fill=tk.X, padx=12, pady=(0, 12))
         
-        btn_frame = tk.Frame(actions_frame, bg='#34495E')
+        btn_frame = tk.Frame(actions_frame, bg=self.colors["surface"])
         btn_frame.pack()
         
-        tk.Button(
-            btn_frame,
-            text="[Start] Full System",
-            font=("Arial", 12, "bold"),
-            bg='#27AE60',
-            fg='white',
-            padx=20,
-            pady=10,
-            command=self.start_full_system,
-            cursor='hand2'
-        ).pack(side=tk.LEFT, padx=10)
-        
-        tk.Button(
-            btn_frame,
-            text="[Stop] All",
-            font=("Arial", 12, "bold"),
-            bg='#E74C3C',
-            fg='white',
-            padx=20,
-            pady=10,
-            command=self.stop_all,
-            cursor='hand2'
-        ).pack(side=tk.LEFT, padx=10)
-        
-        tk.Button(
-            btn_frame,
-            text="[View] Results",
-            font=("Arial", 12, "bold"),
-            bg='#3498DB',
-            fg='white',
-            padx=20,
-            pady=10,
-            command=self.generate_results,
-            cursor='hand2'
-        ).pack(side=tk.LEFT, padx=10)
+        self.create_primary_button(btn_frame, "Start Full System", self.start_full_system, self.colors["success"]).pack(side=tk.LEFT, padx=10)
+        self.create_primary_button(btn_frame, "Stop All", self.stop_all, self.colors["danger"]).pack(side=tk.LEFT, padx=10)
+        self.create_primary_button(btn_frame, "Generate Results", self.generate_results, self.colors["info"]).pack(side=tk.LEFT, padx=10)
     
     def setup_server_tab(self):
         """Server control tab"""
-        server_frame = tk.Frame(self.notebook, bg='#34495E')
-        self.notebook.add(server_frame, text="[Server]")
+        server_frame = tk.Frame(self.notebook, bg=self.colors["surface"])
+        self.notebook.add(server_frame, text="Server")
         
         # Control panel
         control_panel = tk.LabelFrame(
             server_frame,
             text="Server Control",
-            font=("Arial", 14, "bold"),
-            bg='#34495E',
-            fg='#ECF0F1',
+            font=self.section_font,
+            bg=self.colors["surface"],
+            fg=self.colors["text"],
+            bd=1,
+            relief=tk.FLAT,
+            highlightthickness=1,
+            highlightbackground=self.colors["border"],
             padx=20,
             pady=20
         )
-        control_panel.pack(fill=tk.X, padx=10, pady=10)
+        control_panel.pack(fill=tk.X, padx=12, pady=12)
         
         # Rounds input
-        rounds_frame = tk.Frame(control_panel, bg='#34495E')
+        rounds_frame = tk.Frame(control_panel, bg=self.colors["surface"])
         rounds_frame.pack(pady=10)
         
         tk.Label(
             rounds_frame,
             text="Number of Rounds:",
-            font=("Arial", 12),
-            bg='#34495E',
-            fg='#ECF0F1'
+            font=("Segoe UI", 11),
+            bg=self.colors["surface"],
+            fg=self.colors["text"]
         ).pack(side=tk.LEFT, padx=5)
         
         self.rounds_var = tk.StringVar(value="10")
         rounds_entry = tk.Entry(
             rounds_frame,
             textvariable=self.rounds_var,
-            font=("Arial", 12),
-            width=10
+            font=("Segoe UI", 11),
+            width=10,
+            bg=self.colors["surface_alt"],
+            fg=self.colors["text"],
+            insertbackground=self.colors["text"],
+            relief=tk.FLAT,
+            highlightthickness=1,
+            highlightbackground=self.colors["border"],
+            highlightcolor=self.colors["info"]
         )
         rounds_entry.pack(side=tk.LEFT, padx=5)
         
         # Buttons
-        btn_frame = tk.Frame(control_panel, bg='#34495E')
+        btn_frame = tk.Frame(control_panel, bg=self.colors["surface"])
         btn_frame.pack(pady=10)
         
-        self.start_server_btn = tk.Button(
-            btn_frame,
-            text="[Start] Server",
-            font=("Arial", 12, "bold"),
-            bg='#27AE60',
-            fg='white',
-            padx=30,
-            pady=10,
-            command=self.start_server,
-            cursor='hand2'
-        )
+        self.start_server_btn = self.create_primary_button(btn_frame, "Start Server", self.start_server, self.colors["success"])
         self.start_server_btn.pack(side=tk.LEFT, padx=10)
         
-        self.stop_server_btn = tk.Button(
-            btn_frame,
-            text="[Stop] Server",
-            font=("Arial", 12, "bold"),
-            bg='#E74C3C',
-            fg='white',
-            padx=30,
-            pady=10,
-            command=self.stop_server,
-            state=tk.DISABLED,
-            cursor='hand2'
-        )
+        self.stop_server_btn = self.create_primary_button(btn_frame, "Stop Server", self.stop_server, self.colors["danger"])
+        self.stop_server_btn.config(state=tk.DISABLED)
         self.stop_server_btn.pack(side=tk.LEFT, padx=10)
         
         # Server output
         output_panel = tk.LabelFrame(
             server_frame,
             text="Server Output",
-            font=("Arial", 12, "bold"),
-            bg='#34495E',
-            fg='#ECF0F1',
+            font=("Segoe UI", 11, "bold"),
+            bg=self.colors["surface"],
+            fg=self.colors["text"],
+            bd=1,
+            relief=tk.FLAT,
+            highlightthickness=1,
+            highlightbackground=self.colors["border"],
             padx=10,
             pady=10
         )
-        output_panel.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        output_panel.pack(fill=tk.BOTH, expand=True, padx=12, pady=(0, 12))
         
         self.server_output = scrolledtext.ScrolledText(
             output_panel,
-            font=("Consolas", 10),
-            bg='#1C2833',
-            fg='#00FF00',
-            insertbackground='white',
-            wrap=tk.WORD
+            font=self.code_font,
+            bg=self.colors["console"],
+            fg=self.colors["console_server"],
+            insertbackground=self.colors["text"],
+            wrap=tk.WORD,
+            relief=tk.FLAT,
+            bd=0,
+            padx=8,
+            pady=8
         )
         self.server_output.pack(fill=tk.BOTH, expand=True)
     
     def setup_clients_tab(self):
         """Clients control tab"""
-        clients_frame = tk.Frame(self.notebook, bg='#34495E')
-        self.notebook.add(clients_frame, text="[Clients]")
+        clients_frame = tk.Frame(self.notebook, bg=self.colors["surface"])
+        self.notebook.add(clients_frame, text="Clients")
         
         # Create sub-tabs for each client
         self.client_notebook = ttk.Notebook(clients_frame)
@@ -317,7 +387,7 @@ class FederatedLearningDashboard:
     
     def create_client_tab(self, client_id):
         """Create tab for individual client"""
-        client_frame = tk.Frame(self.client_notebook, bg='#34495E')
+        client_frame = tk.Frame(self.client_notebook, bg=self.colors["surface"])
         self.client_notebook.add(client_frame, text=f"Client {client_id}")
         self.client_tabs[client_id] = client_frame
         
@@ -325,43 +395,37 @@ class FederatedLearningDashboard:
         control_panel = tk.LabelFrame(
             client_frame,
             text=f"Client {client_id} Control",
-            font=("Arial", 12, "bold"),
-            bg='#34495E',
-            fg='#ECF0F1',
+            font=("Segoe UI", 11, "bold"),
+            bg=self.colors["surface"],
+            fg=self.colors["text"],
+            bd=1,
+            relief=tk.FLAT,
+            highlightthickness=1,
+            highlightbackground=self.colors["border"],
             padx=20,
             pady=15
         )
         control_panel.pack(fill=tk.X, padx=10, pady=10)
         
-        btn_frame = tk.Frame(control_panel, bg='#34495E')
+        btn_frame = tk.Frame(control_panel, bg=self.colors["surface"])
         btn_frame.pack()
         
-        start_btn = tk.Button(
+        start_btn = self.create_primary_button(
             btn_frame,
-            text=f"[Start] Client {client_id}",
-            font=("Arial", 11, "bold"),
-            bg='#27AE60',
-            fg='white',
-            padx=25,
-            pady=8,
-            command=lambda: self.start_client(client_id),
-            cursor='hand2'
+            f"Start Client {client_id}",
+            lambda: self.start_client(client_id),
+            self.colors["success"]
         )
         start_btn.pack(side=tk.LEFT, padx=10)
         self.client_start_btns[client_id] = start_btn
         
-        stop_btn = tk.Button(
+        stop_btn = self.create_primary_button(
             btn_frame,
-            text=f"[Stop] Client {client_id}",
-            font=("Arial", 11, "bold"),
-            bg='#E74C3C',
-            fg='white',
-            padx=25,
-            pady=8,
-            command=lambda: self.stop_client(client_id),
-            state=tk.DISABLED,
-            cursor='hand2'
+            f"Stop Client {client_id}",
+            lambda: self.stop_client(client_id),
+            self.colors["danger"]
         )
+        stop_btn.config(state=tk.DISABLED)
         stop_btn.pack(side=tk.LEFT, padx=10)
         self.client_stop_btns[client_id] = stop_btn
         
@@ -369,9 +433,13 @@ class FederatedLearningDashboard:
         output_panel = tk.LabelFrame(
             client_frame,
             text=f"Client {client_id} Output",
-            font=("Arial", 11, "bold"),
-            bg='#34495E',
-            fg='#ECF0F1',
+            font=("Segoe UI", 11, "bold"),
+            bg=self.colors["surface"],
+            fg=self.colors["text"],
+            bd=1,
+            relief=tk.FLAT,
+            highlightthickness=1,
+            highlightbackground=self.colors["border"],
             padx=10,
             pady=10
         )
@@ -379,81 +447,61 @@ class FederatedLearningDashboard:
         
         output = scrolledtext.ScrolledText(
             output_panel,
-            font=("Consolas", 9),
-            bg='#1C2833',
-            fg='#3498DB',
-            insertbackground='white',
-            wrap=tk.WORD
+            font=self.code_font,
+            bg=self.colors["console"],
+            fg=self.colors["console_client"],
+            insertbackground=self.colors["text"],
+            wrap=tk.WORD,
+            relief=tk.FLAT,
+            bd=0,
+            padx=8,
+            pady=8
         )
         output.pack(fill=tk.BOTH, expand=True)
         self.client_outputs[client_id] = output
     
     def setup_logs_tab(self):
         """Combined logs tab"""
-        logs_frame = tk.Frame(self.notebook, bg='#34495E')
-        self.notebook.add(logs_frame, text="[All Logs]")
+        logs_frame = tk.Frame(self.notebook, bg=self.colors["surface"])
+        self.notebook.add(logs_frame, text="All Logs")
         
         self.all_logs = scrolledtext.ScrolledText(
             logs_frame,
-            font=("Consolas", 9),
-            bg='#1C2833',
-            fg='#ECF0F1',
-            insertbackground='white',
-            wrap=tk.WORD
+            font=self.code_font,
+            bg=self.colors["console"],
+            fg=self.colors["text"],
+            insertbackground=self.colors["text"],
+            wrap=tk.WORD,
+            relief=tk.FLAT,
+            bd=0,
+            padx=8,
+            pady=8
         )
         self.all_logs.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
     
     def setup_results_tab(self):
         """Results visualization tab"""
-        results_frame = tk.Frame(self.notebook, bg='#34495E')
-        self.notebook.add(results_frame, text="[Results]")
+        results_frame = tk.Frame(self.notebook, bg=self.colors["surface"])
+        self.notebook.add(results_frame, text="Results")
         
-        control_frame = tk.Frame(results_frame, bg='#34495E')
+        control_frame = tk.Frame(results_frame, bg=self.colors["surface"])
         control_frame.pack(fill=tk.X, padx=10, pady=10)
         
-        tk.Button(
-            control_frame,
-            text="[Refresh] Results",
-            font=("Arial", 11, "bold"),
-            bg='#3498DB',
-            fg='white',
-            padx=20,
-            pady=8,
-            command=self.load_results,
-            cursor='hand2'
-        ).pack(side=tk.LEFT, padx=5)
-        
-        tk.Button(
-            control_frame,
-            text="[Generate] Metrics",
-            font=("Arial", 11, "bold"),
-            bg='#9B59B6',
-            fg='white',
-            padx=20,
-            pady=8,
-            command=self.generate_results,
-            cursor='hand2'
-        ).pack(side=tk.LEFT, padx=5)
-        
-        tk.Button(
-            control_frame,
-            text="[Open] Results Folder",
-            font=("Arial", 11, "bold"),
-            bg='#16A085',
-            fg='white',
-            padx=20,
-            pady=8,
-            command=self.open_results_folder,
-            cursor='hand2'
-        ).pack(side=tk.LEFT, padx=5)
+        self.create_primary_button(control_frame, "Refresh Results", self.load_results, self.colors["info"]).pack(side=tk.LEFT, padx=5)
+        self.create_primary_button(control_frame, "Generate Metrics", self.generate_results, self.colors["purple"]).pack(side=tk.LEFT, padx=5)
+        self.create_primary_button(control_frame, "Open Results Folder", self.open_results_folder, self.colors["teal"]).pack(side=tk.LEFT, padx=5)
         
         # Results display
         self.results_text = scrolledtext.ScrolledText(
             results_frame,
-            font=("Consolas", 10),
-            bg='#1C2833',
-            fg='#ECF0F1',
-            wrap=tk.WORD
+            font=self.code_font,
+            bg=self.colors["console"],
+            fg=self.colors["text"],
+            wrap=tk.WORD,
+            relief=tk.FLAT,
+            bd=0,
+            padx=10,
+            pady=10
         )
         self.results_text.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
     
@@ -653,7 +701,13 @@ class FederatedLearningDashboard:
         # Server output
         try:
             while True:
-                prefix, line = self.server_queue.get_nowait()
+                item = self.server_queue.get_nowait()
+                if isinstance(item, tuple) and len(item) == 2:
+                    _prefix, line = item
+                else:
+                    line = str(item)
+
+                self._parse_async_line(line)   # <-- add this
                 self.log_server(line)
                 self.log_all(f"[SERVER] {line}", "server")
         except queue.Empty:
@@ -672,6 +726,42 @@ class FederatedLearningDashboard:
         # Schedule next check
         self.root.after(100, self.process_queues)
     
+    def _parse_async_line(self, line: str):
+        """Parse lines like: [ASYNC] fedbuff=1 version=3 buffered=2 applied=1 avg_staleness=0.5000"""
+        if "[ASYNC]" not in line:
+            return
+
+        pairs = dict(re.findall(r"(\w+)=([^\s]+)", line))
+        if not pairs:
+            return
+
+        self.async_stats["fedbuff"] = "Enabled" if pairs.get("fedbuff", "0") == "1" else "Disabled"
+        self.async_stats["version"] = pairs.get("version", self.async_stats["version"])
+        self.async_stats["buffered"] = pairs.get("buffered", self.async_stats["buffered"])
+        self.async_stats["applied"] = pairs.get("applied", self.async_stats["applied"])
+        self.async_stats["avg_staleness"] = pairs.get("avg_staleness", self.async_stats["avg_staleness"])
+
+        try:
+            applied = float(self.async_stats["applied"])
+            staleness = float(self.async_stats["avg_staleness"])
+            if applied > 0:
+                self.async_stats["status"] = "Active"
+                status_color = self.colors["success"]
+            elif staleness > 0:
+                self.async_stats["status"] = "Buffered/Stale"
+                status_color = self.colors["warning"]
+            else:
+                self.async_stats["status"] = "Idle"
+                status_color = self.colors["text_muted"]
+        except Exception:
+            self.async_stats["status"] = "Unknown"
+            status_color = self.colors["text_muted"]
+
+        for key, lbl in self.async_labels.items():
+            lbl.config(text=self.async_stats[key])
+        if "status" in self.async_labels:
+            self.async_labels["status"].config(fg=status_color)
+
     def log_server(self, message):
         """Log message to server output"""
         self.server_output.insert(tk.END, message + "\n")
@@ -689,19 +779,19 @@ class FederatedLearningDashboard:
         
         # Color coding
         colors = {
-            "success": "#27AE60",
-            "error": "#E74C3C",
-            "warning": "#F39C12",
-            "info": "#3498DB",
-            "server": "#9B59B6",
-            "client": "#1ABC9C"
+            "success": self.colors["success"],
+            "error": self.colors["danger"],
+            "warning": self.colors["warning"],
+            "info": self.colors["info"],
+            "server": self.colors["purple"],
+            "client": self.colors["teal"]
         }
         
         self.all_logs.insert(tk.END, f"[{timestamp}] ", "timestamp")
         self.all_logs.insert(tk.END, f"{message}\n", level)
         
         # Apply color tags
-        self.all_logs.tag_config("timestamp", foreground="#95A5A6")
+        self.all_logs.tag_config("timestamp", foreground=self.colors["text_muted"])
         for tag, color in colors.items():
             self.all_logs.tag_config(tag, foreground=color)
         
@@ -710,16 +800,16 @@ class FederatedLearningDashboard:
     def update_server_status(self):
         """Update server status display"""
         if self.server_status == "Running":
-            self.server_status_label.config(text="● Running", fg='#27AE60')
+            self.server_status_label.config(text="● Running", fg=self.colors["success"])
         else:
-            self.server_status_label.config(text="● Stopped", fg='#E74C3C')
+            self.server_status_label.config(text="● Stopped", fg=self.colors["danger"])
     
     def update_client_status(self, client_id):
         """Update client status display"""
         if self.client_statuses[client_id] == "Running":
-            self.client_status_labels[client_id].config(text="● Running", fg='#27AE60')
+            self.client_status_labels[client_id].config(text="● Running", fg=self.colors["success"])
         else:
-            self.client_status_labels[client_id].config(text="● Stopped", fg='#95A5A6')
+            self.client_status_labels[client_id].config(text="● Stopped", fg=self.colors["text_muted"])
     
     def generate_results(self):
         """Generate metrics and visualizations"""
@@ -730,7 +820,7 @@ class FederatedLearningDashboard:
                 [sys.executable, "generate_metrics.py"],
                 capture_output=True,
                 text=True,
-                timeout=60
+                timeout=300
             )
             
             if result.returncode == 0:
@@ -783,7 +873,7 @@ class FederatedLearningDashboard:
                     if metric in last_round:
                         self.results_text.insert(tk.END, f"{metric.replace('_', ' ').title():<20}: {last_round[metric]:.4f}\n")
             
-            self.results_text.tag_config("header", font=("Arial", 12, "bold"), foreground="#3498DB")
+            self.results_text.tag_config("header", font=("Segoe UI", 12, "bold"), foreground=self.colors["info"])
             
         except Exception as e:
             self.results_text.delete(1.0, tk.END)
